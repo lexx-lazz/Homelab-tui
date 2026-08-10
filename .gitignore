@@ -1,0 +1,8 @@
+# Holds server addresses and SSH usernames - keep it local.
+# Commit homelab-tui.config.example.json instead.
+homelab-tui.config.json
+
+# Windows / editor noise
+desktop.ini
+Thumbs.db
+*.lnk

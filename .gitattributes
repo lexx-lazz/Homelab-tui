@@ -1,0 +1,6 @@
+# The script MUST stay UTF-8 with a BOM. PowerShell 5.1 reads BOM-less UTF-8
+# as ANSI, which turns every box-drawing character into mojibake.
+*.ps1 text eol=crlf
+
+*.md   text eol=lf
+*.json text eol=lf
