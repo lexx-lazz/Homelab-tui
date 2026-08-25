@@ -4,3 +4,9 @@
 
 *.md   text eol=lf
 *.json text eol=lf
+
+# Server-side files must stay LF. A .sh with CRLF dies on Linux with
+# "bad interpreter: /bin/bash^M", and these get scp'd straight from this
+# working copy, so the working copy itself has to be LF - not just the blob.
+*.sh   text eol=lf
+*.py   text eol=lf

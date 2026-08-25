@@ -30,6 +30,22 @@ $Global:Themes = @{
 # Servers live in the config file, not here - add them with [ + ] in the UI.
 $Global:Servers = @()
 
+# ==================== FORKING THIS? START HERE ====================
+# Every assumption about a particular server lives in this one table. The rest
+# of the file is UI and knows nothing about what the commands actually are.
+# To point it at your own setup, edit these strings and nothing else.
+$Global:Cmd = @{
+    Btop      = "btop"                     # whatever your live-stats tool is
+    SitesDir  = "/var/www/sites"           # one directory holding site checkouts
+    Deploy    = "cd {0} && git pull"       # {0} = SitesDir/<the site you picked>
+    Shutdown  = "sudo shutdown now"
+    PiholeTui = "~/.local/bin/pihole-tui"  # installed by pihole-tui/install.sh
+    Pihole    = "pihole"                   # docker container name
+}
+# To add a whole new action: add one entry to $Global:ToolCatalog, then one
+# case to the switch in Show-ServerScreen. Those are the only two places.
+# ===================================================================
+
 function Get-Theme { return $Global:Themes[$Global:ThemeNames[$Global:ThemeIndex]] }
 
 # ---------------- Config (theme, font size, server list) ----------------
@@ -50,7 +66,13 @@ function Import-HlConfig {
                 if (-not $s.IP) { continue }
                 $name = $s.Name; if (-not $name) { $name = [string]$s.IP }
                 $user = $s.User; if (-not $user) { $user = "root" }
-                $list += @{ Name = [string]$name; IP = [string]$s.IP; User = [string]$user }
+                $entry = @{ Name = [string]$name; IP = [string]$s.IP; User = [string]$user }
+                # optional per-server overrides, carried through untouched so
+                # editing a server in the UI cannot silently drop them
+                if ($s.PiholeContainer) { $entry.PiholeContainer = [string]$s.PiholeContainer }
+                if ($s.PiholePort)      { $entry.PiholePort      = [int]$s.PiholePort }
+                if ($s.PSObject.Properties.Name -contains "Tools") { $entry.Tools = @($s.Tools) }
+                $list += $entry
             }
             $Global:Servers = $list
         }
@@ -62,7 +84,11 @@ function Export-HlConfig {
     try {
         $list = @()
         foreach ($s in @($Global:Servers)) {
-            $list += [PSCustomObject]@{ Name = $s.Name; IP = $s.IP; User = $s.User }
+            $o = [ordered]@{ Name = $s.Name; IP = $s.IP; User = $s.User }
+            if ($s.PiholeContainer) { $o.PiholeContainer = $s.PiholeContainer }
+            if ($s.PiholePort)      { $o.PiholePort      = $s.PiholePort }
+            if ($null -ne $s.Tools)  { $o.Tools           = @($s.Tools) }
+            $list += [PSCustomObject]$o
         }
         $obj = [PSCustomObject]@{
             Theme    = $Global:ThemeNames[$Global:ThemeIndex]
@@ -914,15 +940,95 @@ function Show-MainMenu($selected, $tab, $actionCol) {
 }
 
 # ---------------- Server detail (tabs: Actions / Info / Themes) ----------------
-$Global:ServerTabs = @("ACTIONS","INFO","THEMES")
+# ---------------- Per-server tool list ----------------
+# Which actions a server offers. No Tools key in the config means all of them,
+# so entries written before this existed keep working untouched.
+$Global:ToolCatalog = @(
+    @{ Key = "ssh";      Label = "Connect (SSH)" },
+    @{ Key = "deploy";   Label = "Deploy site" },
+    @{ Key = "btop";     Label = "Live stats (btop)" },
+    @{ Key = "pihole";   Label = "Pi-hole" },
+    @{ Key = "shutdown"; Label = "Shutdown" }
+)
+
+function Get-ServerTools($server) {
+    if ($null -eq $server.Tools) {
+        $all = @()
+        foreach ($tool in $Global:ToolCatalog) { $all += $tool.Key }
+        return $all
+    }
+    return @($server.Tools)
+}
+
+function Test-ServerTool($server, $key) {
+    return ((Get-ServerTools $server) -contains $key)
+}
+
+function Get-ServerToolList($server) {
+    $list = @()
+    foreach ($tool in $Global:ToolCatalog) {
+        if (Test-ServerTool $server $tool.Key) { $list += $tool }
+    }
+    return $list
+}
+
+function Get-ServerActions($server) {
+    $labels = @()
+    foreach ($tool in (Get-ServerToolList $server)) { $labels += $tool.Label }
+    $labels += "Back"
+    return $labels
+}
+
+function Set-ServerTool($server, $key, $on) {
+    $keys = @(Get-ServerTools $server)
+    if ($on) {
+        if ($keys -notcontains $key) { $keys += $key }
+    } else {
+        $keys = @($keys | Where-Object { $_ -ne $key })
+    }
+    # rebuild in catalog order so the config file stays readable
+    $ordered = @()
+    foreach ($tool in $Global:ToolCatalog) {
+        if ($keys -contains $tool.Key) { $ordered += $tool.Key }
+    }
+    $server.Tools = $ordered
+    Export-HlConfig
+}
+
+function Write-ToolsPanel($server, $sel, $t) {
+    for ($i = 0; $i -lt $Global:ToolCatalog.Count; $i++) {
+        $tool = $Global:ToolCatalog[$i]
+        if ($i -eq $sel) { $marker = "██ " } else { $marker = "   " }
+        if (Test-ServerTool $server $tool.Key) {
+            $box = "[█] "
+            $boxColor = $t.Success
+        } else {
+            $box = "[ ] "
+            $boxColor = $t.Shadow
+        }
+        $segs = @(
+            (Seg $marker $t.Accent),
+            (Seg $box $boxColor),
+            (Seg (Fit $tool.Label 22) $t.Text),
+            (Seg $tool.Key $t.Shadow)
+        )
+        Write-Row $segs $t -Selected:($i -eq $sel)
+    }
+}
+
+$Global:ServerTabs = @("ACTIONS","INFO","TOOLS","THEMES")
 
 function Show-ServerScreen($server) {
     $tab = 0
-    $actions = @("Connect (SSH)", "Deploy site", "Live stats (btop)", "Shutdown", "Back")
     $actionSel = 0
+    $toolSel   = 0
 
     while ($true) {
         $t = Get-Theme
+        # rebuilt each frame - toggling a tool changes this list immediately
+        $actions = Get-ServerActions $server
+        if ($actionSel -ge $actions.Count) { $actionSel = $actions.Count - 1 }
+        if ($actionSel -lt 0) { $actionSel = 0 }
         Set-ThemeConsole
         Write-Host ""
         Show-Title $t
@@ -948,6 +1054,8 @@ function Show-ServerScreen($server) {
                 (Seg "   ▓ Status : " $t.Text),
                 (Get-StatusSegment $server.IP $t)
             ) $t
+        } elseif ($tab -eq 2) {
+            Write-ToolsPanel $server $toolSel $t
         } else {
             Write-ThemePanel $t
         }
@@ -955,7 +1063,11 @@ function Show-ServerScreen($server) {
         Write-PanelBottom $t
         Write-Host ""
         Write-PanelTop $t
-        Write-TextRow " ▓ [Up/Dn] Move    [Tab] Switch tab    [Enter] Run" $t $t.Text
+        if ($tab -eq 2) {
+            Write-TextRow " ▓ [Up/Dn] Move    [Enter/Space] Toggle    [Tab] Switch tab" $t $t.Text
+        } else {
+            Write-TextRow " ▓ [Up/Dn] Move    [Tab] Switch tab    [Enter] Run" $t $t.Text
+        }
         Write-TextRow " ▓ [R] Refresh     [PgUp/PgDn] Font     [B] Back" $t $t.Text
         Write-PanelBottom $t
 
@@ -975,6 +1087,16 @@ function Show-ServerScreen($server) {
         if ($key -eq "Left") { if ($tab -gt 0) { $tab-- } else { $tab = $Global:ServerTabs.Count - 1 }; continue }
 
         if ($tab -eq 2) {
+            if ($key -eq "Up")   { if ($toolSel -gt 0) { $toolSel-- } }
+            if ($key -eq "Down") { if ($toolSel -lt $Global:ToolCatalog.Count - 1) { $toolSel++ } }
+            if ($key -eq "Enter" -or $key -eq " ") {
+                $tool = $Global:ToolCatalog[$toolSel]
+                Set-ServerTool $server $tool.Key (-not (Test-ServerTool $server $tool.Key))
+            }
+            continue
+        }
+
+        if ($tab -eq 3) {
             [void](Invoke-ThemeKey $key)
             if ($key -eq "Enter") { $tab = 0 }
             continue
@@ -984,24 +1106,31 @@ function Show-ServerScreen($server) {
             if ($key -eq "Up")   { if ($actionSel -gt 0) { $actionSel-- } }
             if ($key -eq "Down") { if ($actionSel -lt $actions.Count - 1) { $actionSel++ } }
             if ($key -eq "Enter") {
-                $choice = $actions[$actionSel]
+                $tools  = Get-ServerToolList $server
                 $target = $server.User + "@" + $server.IP
-                if ($choice -eq "Back") { return }
-                if ($choice -eq "Connect (SSH)") {
+                # anything past the last tool is the trailing "Back" row
+                if ($actionSel -ge $tools.Count) { return }
+                # switch on the stable Key, never on the display label - a
+                # label-matched dispatch breaks silently when you rename one
+                switch ($tools[$actionSel].Key) {
+                "ssh" {
                     Enter-AppConsole
                     ssh -t $target
                     Exit-AppConsole
                 }
-                if ($choice -eq "Live stats (btop)") {
+                "btop" {
                     Enter-AppConsole
-                    ssh -t $target "btop"
+                    ssh -t $target $Global:Cmd.Btop
                     Exit-AppConsole
                 }
-                if ($choice -eq "Deploy site") {
+                "deploy" {
                     [Console]::CursorVisible = $true
                     Invoke-DeployMenu $server $t
                 }
-                if ($choice -eq "Shutdown") {
+                "pihole" {
+                    Show-PiholeMenu $server $t
+                }
+                "shutdown" {
                     [Console]::CursorVisible = $true
                     Set-ThemeConsole
                     Write-Host ""
@@ -1009,12 +1138,13 @@ function Show-ServerScreen($server) {
                     Write-Host " > " -ForegroundColor $t.Accent -NoNewline
                     $confirm = Read-Host
                     if ($confirm -eq "y") {
-                        ssh $target "sudo shutdown now"
+                        ssh $target $Global:Cmd.Shutdown
                         Write-Host ""
                         Write-Host "  █ Shutdown sent." -ForegroundColor $t.Success
                         Reset-StatusCache
                     }
                     Pause-Screen $t
+                }
                 }
                 [Console]::CursorVisible = $false
             }
@@ -1022,9 +1152,164 @@ function Show-ServerScreen($server) {
     }
 }
 
+# ---------------- Pi-hole ----------------
+# Reads through the Pi-hole CLI's own API client inside the container
+# (`pihole api`), so there is no app password to store or rotate anywhere.
+$Global:PiholePortCache = @{}
+
+# Both overridable per server in the config; these are the stock Pi-hole values.
+function Get-PiholeContainer($server) {
+    if ($server.PiholeContainer) { return [string]$server.PiholeContainer }
+    return $Global:Cmd.Pihole
+}
+
+# Asks docker which host port maps to the container's port 80, so nobody has
+# to hardcode 8080 (or 80, or whatever they picked) to match one setup.
+function Get-PiholePort($server) {
+    if ($server.PiholePort) { return [int]$server.PiholePort }
+    if ($Global:PiholePortCache.ContainsKey($server.IP)) {
+        return $Global:PiholePortCache[$server.IP]
+    }
+    $target = $server.User + "@" + $server.IP
+    $cmd = "docker port " + (Get-PiholeContainer $server) + " 80/tcp 2>/dev/null | head -1"
+    $raw = ssh -o BatchMode=yes -o ConnectTimeout=6 $target $cmd 2>$null
+    $port = 80
+    if ($raw) {
+        $m = [regex]::Match(($raw -join ""), ':(\d+)\s*$')
+        if ($m.Success) { $port = [int]$m.Groups[1].Value }
+    }
+    $Global:PiholePortCache[$server.IP] = $port
+    return $port
+}
+
+function Get-PiholeUrl($server) {
+    $port = Get-PiholePort $server
+    if ($port -eq 80) { return "http://" + $server.IP + "/admin" }
+    return "http://" + $server.IP + ":" + $port + "/admin"
+}
+
+# Both endpoints in one SSH call - the handshake costs about a second, so two
+# separate calls double the wait for no reason.
+function Get-PiholeSnapshot($target, $c) {
+    $cmd = "docker exec " + $c + " pihole api stats/summary 2>/dev/null" +
+           "; echo '<<SPLIT>>'; " +
+           "docker exec " + $c + " pihole api dns/blocking 2>/dev/null"
+    # -o options: fail fast instead of hanging the menu on a dead host, and
+    # 2>$null keeps ssh's own errors from painting over the panel
+    $raw = ssh -o BatchMode=yes -o ConnectTimeout=6 $target $cmd 2>$null
+    if (-not $raw) { return $null }
+    $parts = (($raw -join "`n") -split "<<SPLIT>>")
+    $out = @{ Summary = $null; Blocking = $null }
+    if ($parts.Count -ge 1) { try { $out.Summary  = $parts[0] | ConvertFrom-Json } catch { } }
+    if ($parts.Count -ge 2) { try { $out.Blocking = $parts[1] | ConvertFrom-Json } catch { } }
+    return $out
+}
+
+function Show-PiholeStatus($server, $t) {
+    $target = $server.User + "@" + $server.IP
+
+    Show-EntryHeader "PI-HOLE STATUS" $t
+    Write-TextRow "   ░▒▓ Querying the container ..." $t $t.Warn
+    Write-PanelBottom $t
+
+    $snap = Get-PiholeSnapshot $target (Get-PiholeContainer $server)
+    if ($null -eq $snap) {
+        $sum = $null
+        $blk = $null
+    } else {
+        $sum = $snap.Summary
+        $blk = $snap.Blocking
+    }
+
+    Show-EntryHeader "PI-HOLE STATUS" $t
+    if ($null -eq $sum) {
+        Write-TextRow "   ░ No answer from the Pi-hole container." $t $t.Danger
+        Write-TextRow ("   ░ Check: docker exec " + (Get-PiholeContainer $server) + " pihole status") $t $t.Shadow
+        Write-PanelBottom $t
+        Pause-Screen $t
+        return
+    }
+
+    $q = $sum.queries
+    $pct = [Math]::Round($q.percent_blocked, 1)
+
+    if ($null -eq $blk) {
+        $state = "unknown"
+        $stateColor = $t.Shadow
+    } elseif ($blk.blocking -eq "enabled") {
+        $state = "enabled"
+        $stateColor = $t.Success
+    } else {
+        $state = [string]$blk.blocking
+        $stateColor = $t.Danger
+    }
+
+    Write-Row @( (Seg "   ▓ Blocking     : " $t.Text), (Seg ("█ " + $state) $stateColor) ) $t
+    Write-TextRow ("   ▓ Queries      : " + ("{0:N0}" -f $q.total)) $t $t.Text
+    Write-Row @(
+        (Seg "   ▓ Blocked      : " $t.Text),
+        (Seg ("{0:N0}" -f $q.blocked) $t.Danger),
+        (Seg ("   " + $pct + "%") $t.Accent)
+    ) $t
+    Write-TextRow ("   ▓ Cached       : " + ("{0:N0}" -f $q.cached)) $t $t.Text
+    Write-TextRow ("   ▓ Forwarded    : " + ("{0:N0}" -f $q.forwarded)) $t $t.Text
+    Write-TextRow ("   ▓ Clients      : " + ("{0:N0}" -f $sum.clients.active) + " active") $t $t.Text
+    Write-TextRow ("   ▓ Blocklist    : " + ("{0:N0}" -f $sum.gravity.domains_being_blocked) + " domains") $t $t.Text
+    Write-TextRow ("   ▓ Web UI       : " + (Get-PiholeUrl $server)) $t $t.Shadow
+    Write-PanelBottom $t
+    Pause-Screen $t
+}
+
+function Show-PiholeMenu($server, $t) {
+    $target  = $server.User + "@" + $server.IP
+    $items   = @("Status", "Live dashboard", "Open web UI in browser", "Back")
+    $sel     = 0
+
+    while ($true) {
+        $t = Get-Theme
+        Show-EntryHeader "PI-HOLE" $t
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            if ($i -eq $sel) { $marker = "██ " } else { $marker = "   " }
+            $segs = @(
+                (Seg $marker $t.Accent),
+                (Seg ("[{0}] {1}" -f ($i + 1), $items[$i]) $t.Text)
+            )
+            Write-Row $segs $t -Selected:($i -eq $sel)
+        }
+        Write-PanelBottom $t
+        Write-Host ""
+        Write-PanelTop $t
+        Write-TextRow " ▓ [Up/Dn] Move    [Enter] Run    [B] Back" $t $t.Text
+        Write-TextRow ("   " + (Get-PiholeUrl $server)) $t $t.Shadow
+        Write-PanelBottom $t
+
+        $key = Read-NavKey
+        if ($key -eq "B" -or $key -eq "Escape") { return }
+        if ($key -eq "Up")   { if ($sel -gt 0) { $sel-- } }
+        if ($key -eq "Down") { if ($sel -lt $items.Count - 1) { $sel++ } }
+        if ($key -eq "Enter") {
+            $choice = $items[$sel]
+            if ($choice -eq "Back") { return }
+            if ($choice -eq "Status") {
+                Show-PiholeStatus $server $t
+            }
+            if ($choice -eq "Live dashboard") {
+                Enter-AppConsole
+                ssh -t $target $Global:Cmd.PiholeTui
+                Exit-AppConsole
+            }
+            if ($choice -eq "Open web UI in browser") {
+                # this runs on the Windows box, not over SSH, so it really can
+                # open a browser - the remote TUI only prints the URL
+                Start-Process (Get-PiholeUrl $server)
+            }
+        }
+    }
+}
+
 function Invoke-DeployMenu($server, $t) {
     $target = $server.User + "@" + $server.IP
-    $sitesRaw = ssh $target "ls /var/www/sites"
+    $sitesRaw = ssh $target ("ls " + $Global:Cmd.SitesDir)
     $sites = @($sitesRaw -split "`n" | Where-Object { $_ -ne "" })
 
     if ($sites.Count -eq 0) {
@@ -1065,7 +1350,7 @@ function Invoke-DeployMenu($server, $t) {
             $site = $sites[$sel]
             Write-Host ""
             Write-Host ("  ▓ Deploying " + $site + " ...") -ForegroundColor $t.Success
-            $remoteCmd = "cd /var/www/sites/" + $site + " && git pull"
+            $remoteCmd = $Global:Cmd.Deploy -f ($Global:Cmd.SitesDir + "/" + $site)
             ssh $target $remoteCmd
             Pause-Screen $t
             return

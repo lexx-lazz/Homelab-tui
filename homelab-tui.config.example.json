@@ -1,16 +1,23 @@
 {
-    "Theme":  "Dark",
-    "FontSize":  24,
-    "Servers":  [
-                    {
-                        "Name":  "web",
-                        "IP":  "192.168.1.10",
-                        "User":  "youruser"
-                    },
-                    {
-                        "Name":  "nas",
-                        "IP":  "192.168.1.11",
-                        "User":  "admin"
-                    }
-                ]
+    "Theme": "Dark",
+    "FontSize": 24,
+    "Servers": [
+        {
+            "Name": "web",
+            "IP": "192.168.1.10",
+            "User": "youruser"
+        },
+        {
+            "Name": "nas",
+            "IP": "192.168.1.11",
+            "User": "admin",
+            "PiholeContainer": "pihole",
+            "PiholePort": 8080,
+            "Tools": [
+                "ssh",
+                "btop",
+                "shutdown"
+            ]
+        }
+    ]
 }

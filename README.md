@@ -17,9 +17,9 @@ Arrow keys, block-drawing borders, four themes, live server discovery. No module
 >
 > **This is a personal tool, not a product.** The server actions are wired to *my* box — my directory layout, my deploy flow, my conventions. Clone it and the menu will draw perfectly and then fail the moment you press Enter on anything, because the other half of this project lives on a server you don't have.
 >
-> It's public because the parts underneath are worth reading — the discovery code, the theming, the console-resize handling — and because [what the server side assumes](#the-server-side) is documented below. Take the ideas, not the config.
+> It's public because the parts underneath are worth reading — the discovery code, the theming, the console-resize handling — and because what the server side assumes is documented below. Take the ideas, not the config.
 >
-> Making the actions user-definable is [the obvious next step](#next-custom-actions).
+> Which *tools* appear is configurable per server; what each one *runs* is not, on purpose.
 
 ---
 
@@ -92,9 +92,126 @@ Per server, under the `ACTIONS` tab. **These are the hardcoded, personal part.**
 | **Connect (SSH)** | `ssh -t user@host` | Nothing beyond a reachable `sshd` |
 | **Deploy site** | lists `/var/www/sites/*`, then `cd <picked> && git pull` | Sites live in that path, each one a git checkout with a remote |
 | **Live stats (btop)** | `ssh -t user@host btop` | `btop` installed on the server |
+| **Pi-hole** | submenu — status, live dashboard, web UI | a `pihole` container on the host |
 | **Shutdown** | `sudo shutdown now`, behind a y/n confirm | Passwordless sudo, or you type a password |
 
 Only the first is portable. The rest encode decisions I made on the server.
+
+### Picking which tools a server gets
+
+Not every box runs everything — a NAS has no site deploys and no Pi-hole. The **TOOLS**
+tab on a server is a checklist of the five actions above:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  ACTIONS │ INFO │ TOOLS │ THEMES                             │
+├──────────────────────────────────────────────────────────────┤
+│   [█] Connect (SSH)         ssh                              │
+│██ [ ] Deploy site           deploy                           │
+│   [█] Live stats (btop)     btop                             │
+│   [ ] Pi-hole               pihole                           │
+│   [█] Shutdown              shutdown                         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+`Enter` or `Space` toggles, and the ACTIONS tab updates on the same keypress. It saves to
+the server's `Tools` array in the config. **A server with no `Tools` key gets everything**,
+so nothing has to be migrated.
+
+---
+
+## ░▒▓█ Pi-hole █▓▒░
+
+The `Pi-hole` action opens a submenu with three things:
+
+**Status** — one SSH round trip, roughly a second, straight into the panel:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  PI-HOLE STATUS                                              │
+├──────────────────────────────────────────────────────────────┤
+│   ▓ Blocking     : █ enabled                                 │
+│   ▓ Queries      : 2,886                                     │
+│   ▓ Blocked      : 1,167   40.4%                             │
+│   ▓ Cached       : 1,115                                     │
+│   ▓ Forwarded    : 586                                       │
+│   ▓ Clients      : 10 active                                 │
+│   ▓ Blocklist    : 93,516 domains                            │
+│   ▓ Web UI       : http://192.168.1.10/admin                 │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Live dashboard** — hands the terminal to `pihole-tui` on the server over `ssh -t`,
+exactly the way the btop action works. See below.
+
+**Open web UI in browser** — this one runs *locally*, not over SSH, so it genuinely
+opens your browser via `Start-Process`. The dashboard on the server can't do that, so
+it prints the URL in its footer instead.
+
+### No password anywhere
+
+Pi-hole v6's REST API returns `401` unauthenticated, and the usual answer is to mint an
+app password and store it somewhere. That isn't necessary: the Pi-hole CLI ships its own
+authenticated client, so
+
+```bash
+docker exec pihole pihole api stats/summary
+```
+
+returns the same JSON as the REST endpoint with no credential involved. Both the
+PowerShell status panel and the Linux dashboard read through it. Nothing to store, nothing
+to rotate, nothing to leak.
+
+### The live dashboard
+
+`pihole-tui/` in this repo — a btop-styled Python dashboard that runs on the server.
+
+```
+  pi-hole  ● blocking   queries 2,772   blocked 1,164   cached 1,022   on blocklist 93,516
+╭─ queries — last 24h  red blocked · green allowed ──────────────────────────────────────────╮
+│     ▂ ▂                                          ▂▇ █▄                                     │
+│    ▆█ █ ▄       ▂▅ ▆ ▁                           ██ ██ ▃                                   │
+│  ▃ ██ █ █▇ ▂ ▁▄ ██ █ █▁                        ▆ ██▁██ █ ▂     ▂ ▅ ▂                       │
+│  █▁██▆█▄██ █ ██ ██▃█▂██            ▁         ▁ █▂█████▄█ █▆ ▄ ▇█ █ █▅            ▄ █ ▆▃    │
+│ ▂█████████▆█▄██▇███████▁▃         ▆█▁█ ▃    ▂█▄█████████▇██▂█▂██▆█▆██ ▁         ▆█▄█▄██▁██ │
+│ █████████████████████████▂     ▁▆▅████▇██▃▆▄███████████████████████████▁      ▃▄██████████ │
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ top blocked domains ───────────╮╭─ top clients ───────────────────╮╭─ block rate ─────────╮
+│ ads.example-… █████████      42 ││ 192.168.1.31  █████████   2,420 ││      █████████       │
+│ telemetry.ex… ████████─      40 ││ 192.168.1.42  ─────────     267 ││    █████████████     │
+│ track.exampl… ████████─      40 ││ laptop        ─────────      57 ││  █████       █████   │
+│ metrics.exam… ███──────      16 ││ nas           ─────────      16 ││  █████ 42.0% █████   │
+│ beacon.examp… ███──────      15 ││ localhost     ─────────      10 ││  █████blocked█████   │
+│                                 ││                                 ││    █████████████     │
+│                                 ││                                 ││      █████████       │
+│                                 ││                                 ││                      │
+│                                 ││                                 ││   █ 1,164 blocked    │
+│                                 ││                                 ││   █ 1,608 allowed    │
+╰─────────────────────────────────╯╰─────────────────────────────────╯╰──────────────────────╯
+  q quit  r refresh  p pause     web ui http://192.168.1.10/admin  (open on your own machine)
+```
+
+- **24h query graph** — 145 ten-minute buckets from `/api/history`, downsampled to the
+  terminal width and drawn as stacked columns: blocked in red at the bottom, allowed in
+  green above. Partial block glyphs (`▁▂▃▄▅▆▇`) give sub-cell resolution.
+- **Block-rate ring** — a real donut, drawn per character cell from the angle and radius,
+  with the percentage punched through the middle.
+- **Top blocked domains / top clients** — ranked meters with a cool-to-hot gradient.
+- **Tiered refresh** — summary and history every 2s, the top lists every 10s. Each
+  `docker exec` costs ~160ms, so the calls are issued concurrently.
+- `q` quits, `r` forces a refresh, `p` pauses.
+
+Install it on the server:
+
+```bash
+scp -r pihole-tui you@192.168.1.10:~/src/
+ssh you@192.168.1.10 'bash ~/src/pihole-tui/install.sh'
+```
+
+It needs `python3` and `python3-rich`, both of which Ubuntu already had. **No venv** —
+Ubuntu's python3.14 ships without `ensurepip`, so `python3 -m venv` fails unless you
+`sudo apt install python3.14-venv`, and there's nothing to gain from it when the distro
+already packages the one dependency.
 
 ---
 
@@ -205,6 +322,17 @@ Settings live in `homelab-tui.config.json` beside the script, written on change 
 
 **This file is gitignored** — it holds your addresses and SSH usernames. `homelab-tui.config.example.json` is the committed stub.
 
+Three optional per-server keys:
+
+| Key | Default | Use it when |
+|---|---|---|
+| `PiholeContainer` | `pihole` | your container is named something else |
+| `PiholePort` | auto-detected via `docker port` | detection can't run, or you front it with a reverse proxy |
+| `Tools` | all of them | you want a server to show only some actions — set from the TOOLS tab |
+
+Neither is normally needed — the port is read from docker at runtime, so nothing about
+your network is baked into the source.
+
 Edit by hand if you prefer. A missing or malformed file is ignored and defaults are used, so deleting it is always a safe reset.
 
 ---
@@ -219,31 +347,58 @@ Add one by dropping an entry into `$Global:Themes` and its name into `$Global:Th
 
 ---
 
-## ░▒▓█ Next: custom actions █▓▒░
+## ░▒▓█ Making it yours █▓▒░
 
-The actions are just SSH command strings. Moving them into the config would make the script a generic *menu of commands per server*, with my commands becoming my (gitignored) config — which is what makes this personal repo into something anyone could actually use.
+The commands aren't configurable, but they are all in one place. Near the top of
+`Homelab-tui.ps1`, under a header you can't miss:
 
-Sketch:
-
-```json
-"Actions": [
-  { "Label": "Connect (SSH)", "Type": "shell" },
-  { "Label": "Live stats",    "Type": "shell",   "Run": "btop" },
-  { "Label": "Reboot",        "Type": "confirm", "Run": "sudo reboot" },
-  { "Label": "Deploy site",   "Type": "picker",
-    "List": "ls /var/www/sites",
-    "Run":  "cd /var/www/sites/{item} && git pull" }
-]
+```powershell
+$Global:Cmd = @{
+    Btop      = "btop"                     # whatever your live-stats tool is
+    SitesDir  = "/var/www/sites"           # one directory holding site checkouts
+    Deploy    = "cd {0} && git pull"       # {0} = SitesDir/<the site you picked>
+    Shutdown  = "sudo shutdown now"
+    PiholeTui = "~/.local/bin/pihole-tui"  # installed by pihole-tui/install.sh
+    Pihole    = "pihole"                   # docker container name
+}
 ```
 
-Four types cover everything currently hardcoded:
+That's every assumption this tool makes about a server. Point them at your own layout and
+the rest of the file doesn't care — it's UI and knows nothing about what the commands are.
+Want a build step in the deploy? `Deploy = "cd {0} && git pull && npm ci && npm run build"`.
 
-- **`shell`** — interactive, widens the console (SSH, btop)
-- **`run`** — fire and show output
-- **`confirm`** — y/n gate first (shutdown, reboot)
-- **`picker`** — run `List`, pick from the results, substitute into `Run`
+**To add a whole new action**, there are exactly two places:
+
+1. An entry in `$Global:ToolCatalog` — a `Key` and a `Label`.
+2. A case in the `switch` in `Show-ServerScreen`, matched on that `Key`.
+
+It then shows up in the TOOLS checklist for free, per server, and persists to the config
+with no further work. The dispatch matches on `Key` rather than the display label
+specifically so renaming a label can't silently break it.
+
+The Pi-hole dashboard is a separate concern — it's a standalone Python file under
+`pihole-tui/` that only needs `docker exec <container> pihole api` to work, so it'll run
+against any Pi-hole v6 host without touching the PowerShell side at all.
 
 ---
+
+## ░▒▓█ On not generalising this █▓▒░
+
+An earlier draft of this README planned to move every action's command into the config, so
+the tool became a generic *menu of SSH commands per server* and my commands became my
+config. It would have worked, and I decided against it.
+
+The reason is that the commands were never the hard part. `/var/www/sites/<name>` exists
+because I made it exist; `git pull` deploys because I set the remotes up that way; the
+Pi-hole panel works because there's a container called `pihole` on that box. Making the
+*strings* configurable would not give anyone else a working tool — it would just move my
+assumptions from the script into a file, and add a config schema to maintain in exchange
+for nothing I need.
+
+So: **the commands stay hardcoded, and the only rule is that nothing personal lands in the
+repo.** Addresses, usernames and ports live in the gitignored config or are detected at
+runtime. Which tools a server offers is a real setting because I genuinely need it — my
+NAS runs neither the deploys nor Pi-hole. Everything else is welded in on purpose.
 
 ## ░▒▓█ Notes █▓▒░
 
@@ -258,7 +413,8 @@ Four types cover everything currently hardcoded:
 ## ░▒▓█ Limitations █▓▒░
 
 - Port 22 only — no per-server SSH port or identity file
-- Actions are hardcoded (see [above](#next-custom-actions))
+- What each action runs is hardcoded — deliberately, see below. Which actions a server shows is configurable
+- The Pi-hole dashboard assumes a container named `pihole` on the same host
 - No reboot action, no Docker controls
 - The `INFO` tab shows the config entry, not live facts from the host
 - No output history — once a command scrolls past, it's gone
