@@ -6,3 +6,7 @@ homelab-tui.config.json
 desktop.ini
 Thumbs.db
 *.lnk
+
+# Agent material - the contract and the technical history. Never tracked.
+CLAUDE.md
+.claude/
